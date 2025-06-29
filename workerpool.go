@@ -15,6 +15,7 @@ type Workerpool[Task any] struct {
 	handler      WorkerpoolHandler[Task]
 	errorHandler WorkerpoolErrorHandler
 	tasksChannel chan Task
+	internalCtx  context.Context
 	shutdownCtx  context.CancelFunc
 	wg           sync.WaitGroup
 }
@@ -63,32 +64,61 @@ func (w *Workerpool[Task]) setupDefaultErrorHandler() {
 }
 
 func (w *Workerpool[Task]) Start(ctx context.Context) {
-	ctx, w.shutdownCtx = context.WithCancel(ctx)
+	w.internalCtx, w.shutdownCtx = context.WithCancel(ctx)
 
 	for i := 0; i < w.size; i++ {
-		go w.spawnWorker(ctx)
+		go w.spawnWorker(w.internalCtx)
 	}
 }
 
-func (w *Workerpool[Task]) Process(tasks ...Task) {
+func (w *Workerpool[Task]) Process(tasks ...Task) error {
+	if w.internalCtx == nil || w.shutdownCtx == nil {
+		return ErrWorkerpoolNotStarted
+	}
+
 	for _, task := range tasks {
 		w.wg.Add(1)
-		w.tasksChannel <- task
+
+		select {
+		case <-w.internalCtx.Done():
+			w.wg.Done()
+			return w.internalCtx.Err()
+		case w.tasksChannel <- task:
+			continue
+		}
+	}
+
+	return nil
+}
+
+func (w *Workerpool[Task]) Wait() error {
+	doneChan := make(chan struct{})
+
+	func() {
+		w.wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-w.internalCtx.Done():
+		return w.internalCtx.Err()
+	case <-doneChan:
+		return nil
 	}
 }
 
-func (w *Workerpool[Task]) Wait() {
-	w.wg.Wait()
-}
-
-func (w *Workerpool[Task]) Shutdown() {
+func (w *Workerpool[Task]) Shutdown() error {
 	close(w.tasksChannel)
 
-	w.wg.Wait()
+	if err := w.Wait(); err != nil {
+		return err
+	}
 
 	if w.shutdownCtx != nil {
 		w.shutdownCtx()
 	}
+
+	return nil
 }
 
 func (w *Workerpool[Task]) GetAproximatedTasksWaiting() int {
@@ -105,12 +135,25 @@ func (w *Workerpool[Task]) spawnWorker(ctx context.Context) {
 				return
 			}
 
-			err := w.handler(ctx, task)
-			if err != nil {
-				w.errorHandler(err)
-			}
-
-			w.wg.Done()
+			w.processTask(ctx, task)
 		}
+	}
+}
+
+func (w *Workerpool[Task]) processTask(ctx context.Context, task Task) {
+	defer w.wg.Done()
+	defer w.recover()
+
+	err := w.handler(ctx, task)
+	if err != nil {
+		w.errorHandler(err)
+	}
+}
+
+func (w *Workerpool[Task]) recover() {
+	if r := recover(); r != nil {
+		err := fmt.Errorf("artisan: panic recovered in worker while processing task: %v", r)
+
+		w.errorHandler(err)
 	}
 }
