@@ -247,17 +247,14 @@ func TestWorkerpoolProcessing(t *testing.T) {
 				errorLock.Unlock()
 			}),
 			artisan.WithHandler(func(ctx context.Context, task int) error {
-				// Record the order of task processing
 				orderLock.Lock()
 				taskOrder = append(taskOrder, task)
 				orderLock.Unlock()
 
 				if task == 3 {
-					// Simulate a panic in the handler
 					panic("intentional panic for task 3")
 				}
 
-				// Small delay to ensure tasks don't complete too quickly
 				time.Sleep(100 * time.Millisecond)
 				results.Store(task, task*task)
 				return nil
@@ -265,18 +262,15 @@ func TestWorkerpoolProcessing(t *testing.T) {
 		)
 		pool.Start(ctx)
 
-		// Process tasks including the one that will panic
 		err := pool.Process(1, 2, 3, 4, 5)
 		assert.Nil(t, err)
 
 		pool.Wait()
 		defer pool.Shutdown()
 
-		// Check that we got an error from the panic
 		assert.Equal(t, 1, len(errors))
 		assert.Contains(t, errors[0].Error(), "intentional panic for task 3")
 
-		// Verify that other tasks were processed successfully
 		successfulTasks := make(map[int]bool)
 		results.Range(func(key, value any) bool {
 			k := key.(int)
@@ -286,11 +280,9 @@ func TestWorkerpoolProcessing(t *testing.T) {
 			return true
 		})
 
-		// Should have processed all tasks except task 3 (which panicked)
 		assert.Equal(t, 4, len(successfulTasks))
-		assert.False(t, successfulTasks[3], "Task 3 should not have completed due to panic")
+		assert.False(t, successfulTasks[3])
 
-		// Verify that tasks continued to be processed after the panic
 		foundLaterTask := false
 		for _, task := range taskOrder {
 			if task > 3 {
@@ -298,6 +290,6 @@ func TestWorkerpoolProcessing(t *testing.T) {
 				break
 			}
 		}
-		assert.True(t, foundLaterTask, "Tasks after the panic should have been processed")
+		assert.True(t, foundLaterTask)
 	})
 }
